@@ -497,66 +497,55 @@ class MacrosPlugin(BasePlugin):
                 trace("WARNING: YAML configuration file was not found!",
                       filename)
 
-    def _load_module(self, module, module_name):
-        """
-        Load a single module
-
-        Add variables and functions to the config dictionary,
-        via the python module
-        (located in the same directory as the Yaml config file).
-
-        This function enriches the variables dictionary
-
-        The python module must contain the following hook:
-
-        define_env(env):
-            "Declare environment for jinja2 templates for markdown"
-
-            env.variables['a'] = 5
-
-            @env.macro
-            def bar(x):
-                ...
-
-            @env.macro
-            def baz(x):
-                ...
-
-            @env.filter
-            def foobar(x):
-                ...
-
-        """
-        if not module:
-            return
-        trace("Found external Python module '%s' in:" % module_name,
-              self.project_dir)
-        # execute the hook for the macros
-        function_found = False
-        if hasattr(module, 'define_env'):
-            module.define_env(self)
-            function_found = True
-
-        # DECLARE additional event functions
-        # NOTE: each of these functions requires self (the environment).
-        STANDARD_FUNCTIONS = ['define_env']
-        def add_function(funcname: str, funclist: list):
-            "Add another standard function to the module"
-            STANDARD_FUNCTIONS.append(funcname)
-            if hasattr(module, funcname):
-                nonlocal function_found
-                func = getattr(module, funcname)
-                funclist.append(func)
-                function_found = True
-        add_function('on_pre_page_macros',  self.pre_macro_functions)
-        add_function('on_post_page_macros', self.post_macro_functions)
-        add_function('on_post_build',       self.post_build_functions)
-        if function_found:
-            trace("Functions found:", ','.join(STANDARD_FUNCTIONS))
-        else:
-            raise NameError("None of the standard functions was found "
-                            "in module '%s':\n%s" %
-                            (module_name, STANDARD_FUNCTIONS))
+    def _load_modules(self):
+        "Load all modules"
+        self._pre_macro_functions = []
+        self._post_macro_functions = []
+        self._post_build_functions = []
+    
+        # pluglets installed modules (as in pip list)
+        modules = self.config['modules']
+        if modules:
+            trace("Preinstalled modules: ", ','.join(modules))
+        for m in modules:
+            # split the name of package in source (pypi) and module name
+            source_name, module_name = parse_package(m)
+            try:
+                module = importlib.import_module(module_name)
+            except ModuleNotFoundError:
+                if is_on_pypi(source_name, fail_silently=True):
+                    err_msg = (f"Counld not import pluglet '{source_name}'. "
+                                f"Please install it from Pypi:\n\n    pip install {source_name}")
+                    raise ModuleNotFoundError(err_msg, name=module_name)
+                else:
+                    raise ModuleNotFoundError(f"Could not import "
+                        "module '{module_name}' (missing?)")
+            self._load_module(module, module_name)
+        # local module (file or dir)
+        local_module_name = self.config['module_name']
+        debug("Project dir '%s'" % self.project_dir)
+        try:
+            module = import_local_module(self.project_dir, local_module_name)
+            trace("Found local Python module '%s' in:" % local_module_name,
+                  self.project_dir)
+            self._load_module(module, local_module_name)
+        except ImportError as e:
+            if local_module_name == DEFAULT_MODULE_NAME:
+                # Only skip silently if the file genuinely does not exist.
+                # If it exists but failed to import, surface the real error.
+                module_path = os.path.join(self.project_dir,
+                                           local_module_name + '.py')
+                if os.path.isfile(module_path):
+                    raise ImportError(
+                        f"Default module '{local_module_name}' was found in "
+                        f"'{self.project_dir}' but failed to import. "
+                        f"Cause: {e}"
+                    ) from e
+                trace("No default module `%s` found" % DEFAULT_MODULE_NAME)
+            else:
+                raise ImportError("Macro plugin could not find custom '%s' "
+                                  "module in '%s'." %
+                                  (local_module_name, self.project_dir))
 
     def _load_modules(self):
         "Load all modules"
